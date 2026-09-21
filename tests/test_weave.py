@@ -1,17 +1,21 @@
 """核心织纹逻辑的单元测试（不依赖 FastAPI）。"""
 
 import os
+import random
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.weave import (  # noqa: E402
     DesignError,
+    analyze_repeat_period,
     audit_floats,
     build_interlacing,
+    repeat_period_of_matrix,
     search_repair_plans,
     suggest_tie_up_flips,
     validate_design,
+    _proper_divisors,
     _runs,
 )
 
@@ -20,6 +24,24 @@ def check(cond, msg):
     if not cond:
         raise AssertionError(msg)
     print(f"  ok: {msg}")
+
+
+def assert_tiles(matrix, period, msg):
+    """校验 period.unit 在经纬两方向取模平铺后逐点等于整幅矩阵。"""
+    wp, wfp, unit = period.warp_period, period.weft_period, period.unit
+    picks, ends = len(matrix), len(matrix[0])
+    check(wp >= 1 and wfp >= 1, f"{msg}: periods positive")
+    check(ends % wp == 0, f"{msg}: warp_period divides ends")
+    check(picks % wfp == 0, f"{msg}: weft_period divides picks")
+    check(len(unit) == wfp and all(len(r) == wp for r in unit),
+          f"{msg}: unit is weft_period x warp_period")
+    tiled = all(
+        matrix[h][w] == unit[h % wfp][w % wp]
+        for h in range(picks)
+        for w in range(ends)
+    )
+    check(tiled, f"{msg}: unit tiles the full matrix seamlessly (mod wrap)")
+
 
 
 def test_interlacing():
@@ -99,6 +121,161 @@ def test_cyclic_wrap_violation():
     check(len(v_on) == 1 and v_on[0].direction == "warp"
           and v_on[0].yarn_index == 0 and v_on[0].start == 3 and v_on[0].length == 4,
           "wrap-around float merged to length 4 starting at 3")
+
+
+def test_repeat_period_plain_weave():
+    # 平纹 4x4：交织矩阵 [[1,0,1,0],[0,1,0,1],...]，经纬周期都是 2，
+    # 单元 2x2，是严格二维重复
+    threading = [0, 1, 0, 1]
+    tie_up = [[1, 0], [0, 1]]
+    treadling = [0, 1, 0, 1]
+    period = analyze_repeat_period(threading, tie_up, treadling, 2)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    check(period.warp_period == 2 and period.weft_period == 2,
+          "plain weave: both periods are 2")
+    check(period.unit == [[1, 0], [0, 1]], "plain weave: 2x2 unit")
+    check(period.strict_2d_repeat is True, "plain weave: strict 2D repeat")
+    assert_tiles(matrix, period, "plain weave")
+
+
+def test_repeat_period_full_size_when_prime():
+    # 3x3 满幅随机（尺寸为素数且无重复）：不存在小于整幅的周期，
+    # 返回完整尺寸，unit 即整幅矩阵，strict_2d_repeat=False
+    matrix = [
+        [1, 0, 1],
+        [0, 1, 1],
+        [1, 1, 0],
+    ]
+    period = repeat_period_of_matrix(matrix)
+    check(period.warp_period == 3 and period.weft_period == 3,
+          "prime 3x3 matrix: no period smaller than full size")
+    check(period.unit == matrix, "prime 3x3 matrix: unit is the full matrix")
+    check(period.strict_2d_repeat is False,
+          "prime 3x3 matrix: not strict 2D repeat")
+
+
+def test_repeat_period_one_axis_only():
+    # 仅经向重复、纬向不重复：列 [A B A B]，但两行不同
+    # 1 0 1 0
+    # 1 1 1 1
+    # 经向周期 2（<4），纬向周期 2（=行数），不是严格二维重复
+    matrix = [
+        [1, 0, 1, 0],
+        [1, 1, 1, 1],
+    ]
+    period = repeat_period_of_matrix(matrix)
+    check(period.warp_period == 2, "one-axis: warp period 2")
+    check(period.weft_period == 2, "one-axis: weft period full size 2")
+    check(period.unit == [[1, 0], [1, 1]], "one-axis: unit is 2x2 (full height)")
+    check(period.strict_2d_repeat is False,
+          "one-axis: not strict 2D repeat (weft has no smaller period)")
+    assert_tiles(matrix, period, "one-axis")
+
+
+def test_repeat_period_based_on_matrix_not_threading():
+    # 关键：周期必须基于交织矩阵，而非分别检查 threading/treadling。
+    # 3 踏 3 综，仅踩踏板 0、1；tie_up 的第 0、2 列在这两行上相同
+    # （穿综 0 与 2 的经纱交织表现一致），尽管穿综索引本身不同。
+    # threading = [0,1,2,1]（作为序列最小周期 4，无 2-周期，因为 0!=2），
+    # treadling = [0,1,0,1]（周期 2）。交织矩阵中穿综 0 与 2 的列相同，
+    # 因此矩阵经向周期为 2。
+    threading = [0, 1, 2, 1]
+    tie_up = [[1, 0, 1], [0, 1, 0], [0, 0, 1]]
+    treadling = [0, 1, 0, 1]
+    period = analyze_repeat_period(threading, tie_up, treadling, 4)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    # threading 序列本身没有 2-周期（threading[0]=0 != threading[2]=2）
+    check(any(threading[w] != threading[w % 2] for w in range(4)),
+          "threading sequence alone has no 2-period")
+    check(period.warp_period == 2,
+          "matrix warp period 2 despite threading sequence period 4")
+    check(period.weft_period == 2, "matrix weft period 2")
+    check(period.unit == [[1, 0], [0, 1]], "matrix-derived 2x2 unit")
+    check(period.strict_2d_repeat is True, "matrix-derived strict 2D repeat")
+    assert_tiles(matrix, period, "matrix-based")
+
+
+def test_repeat_period_cyclic_boundary():
+    # 循环设计的边界：单列、treadling [0,0,1] 重复两次（6 纬）。
+    # 列为 1 1 0 1 1 0，周期 3 整除 6；取模回绕比较必须正确跨越首尾边界，
+    # 不能因为末段(1,1)接首段(1,1)看似相连而误判为更小周期（2 不整除 6）。
+    threading = [0]
+    tie_up = [[1], [0]]
+    treadling = [0, 0, 1, 0, 0, 1]
+    # 该设计按 cyclic=true 审计
+    matrix, _ = audit_floats(threading, tie_up, treadling, 2, cyclic=True)
+    period = analyze_repeat_period(threading, tie_up, treadling, 2)
+    check(period.warp_period == 1, "single-column: warp period 1")
+    check(period.weft_period == 3, "cyclic boundary: weft period 3 (not 2)")
+    check(period.unit == [[1], [1], [0]], "cyclic boundary: 3x1 unit")
+    check(period.strict_2d_repeat is False,
+          "cyclic boundary single column: not strict 2D repeat")
+    assert_tiles(matrix, period, "cyclic boundary")
+
+    # 直接对跨边界平铺的矩阵验证回绕：4 列模式在边界处也必须对齐
+    wrap_matrix = [
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+    ]
+    wp = repeat_period_of_matrix(wrap_matrix)
+    check(wp.warp_period == 2 and wp.weft_period == 2,
+          "wrap matrix aligned across both boundaries")
+    assert_tiles(wrap_matrix, wp, "wrap matrix")
+
+
+def test_repeat_period_constant_and_single_cell():
+    # 全 1 矩阵 6x4：经纬周期都为 1
+    all_ones = [[1] * 4 for _ in range(6)]
+    period = repeat_period_of_matrix(all_ones)
+    check(period.warp_period == 1 and period.weft_period == 1
+          and period.unit == [[1]], "constant matrix: 1x1 unit")
+    check(period.strict_2d_repeat is True, "constant 6x4: strict 2D repeat")
+    assert_tiles(all_ones, period, "constant")
+
+    # 1x1 单元即整幅，不是严格二维重复
+    single = [[0]]
+    p1 = repeat_period_of_matrix(single)
+    check(p1.warp_period == 1 and p1.weft_period == 1 and p1.unit == [[0]],
+          "single cell: periods 1")
+    check(p1.strict_2d_repeat is False, "single cell: not strict 2D repeat")
+
+
+def test_repeat_period_properties_random():
+    # 随机交织矩阵：周期整除尺寸、单元无缝平铺、且没有更小的整除周期
+    # （用朴素因子枚举交叉验证最小性）。
+    rng = random.Random(20260921)
+    check(_proper_divisors(12) == [1, 2, 3, 4, 6], "proper divisors helper")
+    for picks in range(1, 9):
+        for ends in range(1, 9):
+            matrix = [[rng.randint(0, 1) for _ in range(ends)] for _ in range(picks)]
+            period = repeat_period_of_matrix(matrix)
+            assert_tiles(matrix, period, f"random {picks}x{ends}")
+
+            for d in _proper_divisors(ends):
+                if d >= period.warp_period:
+                    break
+                has_smaller = all(
+                    matrix[h][w] == matrix[h][w % d]
+                    for h in range(picks) for w in range(ends)
+                )
+                check(not has_smaller,
+                      f"{picks}x{ends}: no warp divisor {d} smaller than "
+                      f"{period.warp_period}")
+            for d in _proper_divisors(picks):
+                if d >= period.weft_period:
+                    break
+                has_smaller = all(
+                    matrix[h][w] == matrix[h % d][w]
+                    for h in range(picks) for w in range(ends)
+                )
+                check(not has_smaller,
+                      f"{picks}x{ends}: no weft divisor {d} smaller than "
+                      f"{period.weft_period}")
+            expected_strict = period.warp_period < ends and period.weft_period < picks
+            check(period.strict_2d_repeat == expected_strict,
+                  f"{picks}x{ends}: strict_2d_repeat flag correct")
 
 
 def test_tie_up_suggestions_basic():
@@ -282,6 +459,13 @@ if __name__ == "__main__":
     test_cyclic_merge()
     test_cyclic_audit_end_to_end()
     test_cyclic_wrap_violation()
+    test_repeat_period_plain_weave()
+    test_repeat_period_full_size_when_prime()
+    test_repeat_period_one_axis_only()
+    test_repeat_period_based_on_matrix_not_threading()
+    test_repeat_period_cyclic_boundary()
+    test_repeat_period_constant_and_single_cell()
+    test_repeat_period_properties_random()
     test_tie_up_suggestions_basic()
     test_tie_up_suggestions_ordering()
     test_tie_up_suggestions_no_improvement()

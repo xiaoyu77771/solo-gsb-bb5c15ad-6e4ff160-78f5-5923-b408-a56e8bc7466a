@@ -4,7 +4,9 @@
 踏板—综框绑综矩阵、逐纬踏综序列与最大浮长后，服务自动生成经纬交织矩阵，
 找出所有超过上限的**经向 / 纬向连续浮长**；纹样声明循环时，自动合并矩阵
 首尾跨边界的连续段。合法设计与审计结果入库，可按 ID 查询；维度不一致或
-索引越界的设计将被整份拒绝（HTTP 400，不入库）。对超限设计，还可请求
+索引越界的设计将被整份拒绝（HTTP 400，不入库）。此外可对已存设计做
+**最小循环单元分析**：基于交织矩阵在经、纬两方向求能无缝平铺整幅的最小
+正周期与循环单元。对超限设计，还可请求
 **单步绑综修复建议**：逐一翻转一个绑综单元重跑审计，给出违规减少的候选；
 以及**多步修复方案搜索**：在 1～3 次绑综翻转内搜索最终违规严格减少的方案
 （中间状态允许违规数不下降）。
@@ -86,6 +88,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/designs` | 列出全部合法设计（摘要，含是否超限） |
 | `GET` | `/designs/{id}` | 按 ID 查询设计及其审计结果 |
 | `GET` | `/designs/{id}/audit` | 按设计 ID 单独查询审计结果 |
+| `GET` | `/designs/{id}/repeat-period` | 最小循环单元分析：基于交织矩阵求经纬最小正周期与循环单元 |
 | `POST` | `/designs/{id}/tie-up-suggestions` | 单步绑综修复建议：逐一翻转一个绑综单元重跑审计，返回违规减少的候选 |
 | `POST` | `/designs/{id}/repair-plans` | 多步绑综修复方案：1～3 次翻转内搜索最终违规严格减少的方案，支持 `max_changes`、`limit` |
 | `GET` | `/health` | 健康检查 |
@@ -142,6 +145,69 @@ curl -s -X POST http://localhost:8000/designs \
 curl -s http://localhost:8000/designs/1        # 设计 + 审计结果
 curl -s http://localhost:8000/designs/1/audit  # 仅审计结果
 curl -s http://localhost:8000/designs          # 全部设计摘要
+```
+
+### 最小循环单元分析
+
+`GET http://localhost:8000/designs/{id}/repeat-period`：读取已入库设计并重新
+生成**交织矩阵**，在经、纬两个方向分别寻找能无缝平铺整幅矩阵的**最小正周期**，
+返回循环单元。设计不存在返回 404。接口只读计算，不修改原设计。
+
+周期定义与规则：
+
+- `warp_period`：经向（列方向）最小正周期，即一个循环单元的**列数/经纱数**，
+  必须整除整幅经纱数；
+- `weft_period`：纬向（行方向）最小正周期，即一个循环单元的**行数/纬纱数**，
+  必须整除整幅纬纱数；
+- 周期判断**完全基于交织矩阵逐点比较**（取模回绕：`matrix[h][w]` 必须等于
+  `unit[h % weft_period][w % warp_period]`），**不分别检查** threading /
+  treadling。因此穿综、踏综序列本身没有小周期、但交织结果恰好平铺的设计也能
+  被识别；
+- 取模回绕比较天然覆盖矩阵首尾边界，**声明循环（cyclic）与非循环设计**的周期
+  分析结果一致；
+- 某方向不存在小于整幅的周期（例如该尺寸为素数）时，该方向返回**完整尺寸**，
+  `unit` 即整幅矩阵；
+- `strict_2d_repeat` 仅在两个方向周期**都严格小于**整幅对应尺寸（单元在经、纬
+  两方向都至少平铺 2 次）时为 `true`。
+
+返回字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `warp_period` | 经向最小正周期（循环单元列数），整除经纱数 |
+| `weft_period` | 纬向最小正周期（循环单元行数），整除纬纱数 |
+| `unit` | 最小循环单元矩阵（`weft_period` 行 × `warp_period` 列），重复平铺可无缝还原整幅交织矩阵 |
+| `strict_2d_repeat` | 是否为严格二维重复（两方向周期都小于整幅） |
+
+```bash
+curl -s http://localhost:8000/designs/1/repeat-period
+```
+
+响应（200）：
+
+```json
+{
+  "warp_period": 4,
+  "weft_period": 4,
+  "unit": [
+    [1, 1, 0, 0],
+    [0, 1, 1, 0],
+    [0, 0, 1, 1],
+    [1, 0, 0, 1]
+  ],
+  "strict_2d_repeat": true
+}
+```
+
+无更小周期时（3×3 素数尺寸示例）：
+
+```json
+{
+  "warp_period": 3,
+  "weft_period": 3,
+  "unit": [[1, 0, 1], [0, 1, 1], [1, 1, 0]],
+  "strict_2d_repeat": false
+}
 ```
 
 ### 单步绑综修复建议
@@ -257,7 +323,8 @@ app/
   db.py      # SQLite 持久层
   models.py  # Pydantic 请求/响应模型
 tests/
-  test_weave.py  # 核心逻辑单元测试：python3 tests/test_weave.py
+  test_weave.py               # 核心逻辑单元测试：python3 tests/test_weave.py
+  test_api_repeat_period.py   # repeat-period 接口集成测试（TestClient，临时库）
 Dockerfile
 docker-compose.yml
 requirements.txt

@@ -139,5 +139,26 @@ class RepairPlanOut(BaseModel):
     )
 
 
+class RepeatPeriodOut(BaseModel):
+    """交织矩阵的最小循环单元分析。"""
+
+    warp_period: int = Field(
+        ..., description="经向最小正周期（一个循环单元的列数/经纱数），整除经纱数"
+    )
+    weft_period: int = Field(
+        ..., description="纬向最小正周期（一个循环单元的行数/纬纱数），整除纬纱数"
+    )
+    unit: list[list[int]] = Field(
+        ...,
+        description="最小循环单元矩阵（weft_period 行 × warp_period 列），"
+        "1=经纱在上，0=纬纱在上；在经纬两方向重复平铺可无缝还原整幅交织矩阵",
+    )
+    strict_2d_repeat: bool = Field(
+        ...,
+        description="是否为严格二维重复：仅当 warp_period、weft_period 均严格小于"
+        "整幅对应尺寸（单元在两个方向都至少平铺 2 次）时为 true",
+    )
+
+
 class ErrorOut(BaseModel):
     detail: str

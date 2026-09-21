@@ -45,6 +45,17 @@ class TieUpSuggestion:
 
 
 @dataclass
+class RepeatPeriod:
+    warp_period: int                 # 经向最小正周期（一个循环单元的列数/经纱数）
+    weft_period: int                 # 纬向最小正周期（一个循环单元的行数/纬纱数）
+    unit: list[list[int]]            # 最小循环单元，weft_period 行 × warp_period 列
+    strict_2d_repeat: bool           # 两方向周期是否都严格小于整幅尺寸
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class RepairPlanStep:
     step: int               # 第几步（从 1 开始）
     treadle: int            # 踏板索引（tie_up 行号）
@@ -145,6 +156,95 @@ def build_interlacing(
         [tie_up[pick][shaft] for shaft in threading]
         for pick in treadling
     ]
+
+
+def _proper_divisors(n: int) -> list[int]:
+    """按升序返回 n 的所有真因子（能整除 n 且小于 n 的正整数）。"""
+    small: list[int] = []
+    large: list[int] = []
+    i = 1
+    while i * i <= n:
+        if n % i == 0:
+            small.append(i)
+            if i != 1 and i * i != n:
+                large.append(n // i)
+        i += 1
+    return small + large[::-1]
+
+
+def _min_warp_period(matrix: list[list[int]]) -> int:
+    """交织矩阵在经向（列方向）的最小正周期：最小 p（p 整除列数）使
+    matrix[h][w] == matrix[h][w % p] 对所有单元成立；找不到则返回整幅列数。
+
+    比较基于完整交织矩阵，而非分别检查穿综/踏综。统一按取模回绕比较，
+    天然覆盖跨首尾边界的对齐，因此对声明循环（cyclic）的设计同样正确。
+    """
+    picks = len(matrix)
+    ends = len(matrix[0])
+    for period in _proper_divisors(ends):
+        if all(
+            matrix[h][w] == matrix[h][w % period]
+            for h in range(picks)
+            for w in range(ends)
+        ):
+            return period
+    return ends
+
+
+def _min_weft_period(matrix: list[list[int]]) -> int:
+    """交织矩阵在纬向（行方向）的最小正周期：最小 p（p 整除行数）使
+    matrix[h][w] == matrix[h % p][w] 对所有单元成立；找不到则返回整幅行数。"""
+    picks = len(matrix)
+    ends = len(matrix[0])
+    for period in _proper_divisors(picks):
+        if all(
+            matrix[h][w] == matrix[h % period][w]
+            for h in range(picks)
+            for w in range(ends)
+        ):
+            return period
+    return picks
+
+
+def repeat_period_of_matrix(
+    matrix: list[list[int]],
+) -> RepeatPeriod:
+    """对给定交织矩阵求能无缝平铺整幅的最小循环单元。
+
+    经、纬两个方向独立寻找最小正周期（周期必须整除对应尺寸），取矩阵
+    左上角 weft_period × warp_period 子矩阵为循环单元 unit。
+    strict_2d_repeat 仅在两个方向的周期都严格小于整幅尺寸（单元在经纬
+    两个方向都至少平铺 2 次）时为 True；任一方向不存在更小周期则为 False。
+    """
+    picks = len(matrix)
+    ends = len(matrix[0])
+    warp_period = _min_warp_period(matrix)
+    weft_period = _min_weft_period(matrix)
+    unit = [row[:warp_period] for row in matrix[:weft_period]]
+    return RepeatPeriod(
+        warp_period=warp_period,
+        weft_period=weft_period,
+        unit=unit,
+        strict_2d_repeat=warp_period < ends and weft_period < picks,
+    )
+
+
+def analyze_repeat_period(
+    threading: list[int],
+    tie_up: list[list[int]],
+    treadling: list[int],
+    max_float: int,
+) -> RepeatPeriod:
+    """由穿综、绑综、踏综生成交织矩阵后求最小循环单元。
+
+    周期分析完全基于生成出的交织矩阵，不分别检查 threading / treadling；
+    因此穿综与踏综单独看没有小周期、但交织结果恰好平铺的设计也能被识别。
+    （交织矩阵的平铺等价性与设计是否声明 cyclic 无关：取模回绕比较对
+    循环设计的首尾边界天然成立。）
+    """
+    validate_design(threading, tie_up, treadling, max_float)
+    matrix = build_interlacing(threading, tie_up, treadling)
+    return repeat_period_of_matrix(matrix)
 
 
 def _runs(line: list[int], target: int, cyclic: bool) -> list[tuple[int, int]]:
