@@ -139,5 +139,34 @@ class RepairPlanOut(BaseModel):
     )
 
 
+class RepeatPeriodOut(BaseModel):
+    """交织矩阵的最小循环单元（完全组织）分析结果。"""
+
+    warp_period: int = Field(
+        ...,
+        ge=1,
+        description="经向最小正周期：最小循环单元包含的经纱数（列数），"
+        "必须整除 warp_ends；不存在更小周期时等于 warp_ends",
+    )
+    weft_period: int = Field(
+        ...,
+        ge=1,
+        description="纬向最小正周期：最小循环单元包含的纬纱数（行数），"
+        "必须整除 weft_picks；不存在更小周期时等于 weft_picks",
+    )
+    strict_2d_repeat: bool = Field(
+        ...,
+        description="是否为严格的二维重复：warp_period < warp_ends 且 "
+        "weft_period < weft_picks（任一方向无更小周期则为 false）",
+    )
+    unit: list[list[int]] = Field(
+        ...,
+        description="最小循环单元交织矩阵（weft_period 行 × warp_period 列，"
+        "1=经纱在上，0=纬纱在上），沿经纬两个方向平铺即无差别复现整幅矩阵",
+    )
+    warp_ends: int = Field(..., description="整幅经纱数（交织矩阵列数）")
+    weft_picks: int = Field(..., description="整幅纬纱数（交织矩阵行数）")
+
+
 class ErrorOut(BaseModel):
     detail: str

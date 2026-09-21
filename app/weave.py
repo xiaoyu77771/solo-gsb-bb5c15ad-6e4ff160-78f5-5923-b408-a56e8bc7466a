@@ -33,6 +33,19 @@ class FloatViolation:
 
 
 @dataclass
+class RepeatPeriod:
+    warp_period: int                 # 经向（列方向）最小正周期
+    weft_period: int                 # 纬向（行方向）最小正周期
+    unit: list[list[int]]            # 最小循环单元矩阵（weft_period 行 × warp_period 列）
+    strict_2d_repeat: bool           # 两个方向的周期是否都严格小于整幅尺寸
+    warp_ends: int                   # 整幅经纱数（列数）
+    weft_picks: int                  # 整幅纬纱数（行数）
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class TieUpSuggestion:
     treadle: int               # 踏板索引（tie_up 行号）
     shaft: int                 # 综框索引（tie_up 列号）
@@ -394,3 +407,87 @@ def search_repair_plans(
         )
     )
     return plans[:limit]
+
+
+def _divisors(n: int) -> list[int]:
+    """n 的全部正因数（升序），n >= 1。"""
+    small: list[int] = []
+    large: list[int] = []
+    d = 1
+    while d * d <= n:
+        if n % d == 0:
+            small.append(d)
+            if d * d != n:
+                large.append(n // d)
+        d += 1
+    return small + large[::-1]
+
+
+def repeat_period_of_matrix(matrix: list[list[int]]) -> RepeatPeriod:
+    """对交织矩阵求最小循环单元（完全组织）。
+
+    比较直接基于交织矩阵的逐点取值（而非分别检查 threading/treadling：
+    不同穿综/踏综序列可能产生相同交织结果，反之穿综序列的循环也未必与
+    交织矩阵的最小循环一致）。
+
+    - warp_period：单元包含的经纱数（列数），沿行方向平铺，必须整除
+      warp_ends（整幅列数）；
+    - weft_period：单元包含的纬纱数（行数），沿列方向平铺，必须整除
+      weft_picks（整幅行数）；
+    - unit：取矩阵左上 weft_period 行 × warp_period 列的子矩阵，沿两方向
+      平铺即无差别复现整幅矩阵；
+    - strict_2d_repeat：两个周期都严格小于对应整幅尺寸，即矩阵确为一个
+      小于整幅的二维单元的重复（任一方向退化为整幅则为 false）。
+
+    周期判定统一用下标取模（matrix[h][w] == matrix[h][w % p] 等）。要求
+    周期整除整幅尺寸时，取模比较与“逐点平移并跨过末列/首列（末行/首行）
+    边界”的循环比较完全等价，因此循环纹样在首尾相接处的边界也被正确检验；
+    不存在小于整幅的周期时，两方向均返回完整尺寸，unit 即整幅矩阵。
+    """
+    picks = len(matrix)          # 纬纱数（行数）
+    ends = len(matrix[0])        # 经纱数（列数）
+
+    # 经向循环数（单元列数）：沿行方向平移，matrix[h][w] == matrix[h][w % p]
+    warp_period = ends
+    for p in _divisors(ends)[:-1]:  # ends 自身一定成立，最后兜底
+        if all(
+            matrix[h][w] == matrix[h][w % p]
+            for h in range(picks)
+            for w in range(p, ends)
+        ):
+            warp_period = p
+            break
+
+    # 纬向循环数（单元行数）：沿列方向平移，matrix[h][w] == matrix[h % q][w]
+    weft_period = picks
+    for q in _divisors(picks)[:-1]:
+        if all(
+            matrix[h][w] == matrix[h % q][w]
+            for h in range(q, picks)
+            for w in range(ends)
+        ):
+            weft_period = q
+            break
+
+    unit = [
+        [matrix[h][w] for w in range(warp_period)]
+        for h in range(weft_period)
+    ]
+    return RepeatPeriod(
+        warp_period=warp_period,
+        weft_period=weft_period,
+        unit=unit,
+        strict_2d_repeat=warp_period < ends and weft_period < picks,
+        warp_ends=ends,
+        weft_picks=picks,
+    )
+
+
+def analyze_repeat_period(
+    threading: list[int],
+    tie_up: list[list[int]],
+    treadling: list[int],
+) -> RepeatPeriod:
+    """由已存设计的穿综、绑综、踏综重新生成交织矩阵并求最小循环单元。"""
+    matrix = build_interlacing(threading, tie_up, treadling)
+    return repeat_period_of_matrix(matrix)

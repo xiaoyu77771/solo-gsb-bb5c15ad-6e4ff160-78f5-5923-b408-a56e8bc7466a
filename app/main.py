@@ -13,6 +13,7 @@ from .models import (
     DesignOut,
     DesignSummary,
     ErrorOut,
+    RepeatPeriodOut,
     RepairPlanOut,
     TieUpSuggestionOut,
     Violation,
@@ -116,6 +117,29 @@ def get_audit(design_id: int) -> dict:
     if stored is None:
         raise HTTPException(status_code=404, detail=f"design {design_id} not found")
     return stored["audit"]
+
+
+@app.get(
+    "/designs/{design_id}/repeat-period",
+    response_model=RepeatPeriodOut,
+    responses={404: {"model": ErrorOut, "description": "设计不存在"}},
+    tags=["designs"],
+)
+def get_repeat_period(design_id: int) -> dict:
+    """最小循环单元分析：读取已入库设计，重新生成交织矩阵，在经、纬两个方向
+    寻找能无缝平铺整个矩阵的最小正周期（周期必须整除对应整幅尺寸），并返回
+    最小循环单元。比较基于交织矩阵逐点取值（而非分别检查穿综/踏综序列）；
+    循环纹样首尾相接处的边界也参与周期判定。当不存在小于整幅的周期时，
+    对应方向返回完整尺寸。设计不存在返回 404。"""
+    stored = db.get_design(design_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"design {design_id} not found")
+    period = weave.analyze_repeat_period(
+        stored["threading"],
+        stored["tie_up"],
+        stored["treadling"],
+    )
+    return period.to_dict()
 
 
 @app.post(

@@ -7,11 +7,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.weave import (  # noqa: E402
     DesignError,
+    analyze_repeat_period,
     audit_floats,
     build_interlacing,
+    repeat_period_of_matrix,
     search_repair_plans,
     suggest_tie_up_flips,
     validate_design,
+    _divisors,
     _runs,
 )
 
@@ -235,6 +238,151 @@ def test_repair_plans_limit_and_validation():
     print("  ok: repair plan parameter validation")
 
 
+def test_repeat_period_plain_weave():
+    # 平纹 4x4：单元 [[1,0],[0,1]]，经/纬周期均为 2
+    threading = [0, 1, 0, 1]
+    tie_up = [[1, 0], [0, 1]]
+    treadling = [0, 1, 0, 1]
+    r = analyze_repeat_period(threading, tie_up, treadling)
+    check(r.warp_period == 2, "plain weave warp period 2")
+    check(r.weft_period == 2, "plain weave weft period 2")
+    check(r.unit == [[1, 0], [0, 1]], "plain weave unit matrix")
+    check(r.strict_2d_repeat is True, "plain weave is strict 2D repeat")
+    check(r.warp_ends == 4 and r.weft_picks == 4, "full dimensions reported")
+    # unit 平铺必须无差别复现整幅矩阵
+    matrix = build_interlacing(threading, tie_up, treadling)
+    tiled = [
+        [r.unit[h % r.weft_period][w % r.warp_period]
+         for w in range(r.warp_ends)]
+        for h in range(r.weft_picks)
+    ]
+    check(tiled == matrix, "unit tiles the full matrix exactly")
+
+
+def test_repeat_period_twill():
+    # 2/2 斜纹 8x8：交织单元为 4x4（非 8），两方向周期均为 4
+    threading = [0, 1, 2, 3, 0, 1, 2, 3]
+    tie_up = [[1, 1, 0, 0],
+              [0, 1, 1, 0],
+              [0, 0, 1, 1],
+              [1, 0, 0, 1]]
+    treadling = [0, 1, 2, 3, 0, 1, 2, 3]
+    r = analyze_repeat_period(threading, tie_up, treadling)
+    expected_unit = [[1, 1, 0, 0],
+                     [0, 1, 1, 0],
+                     [0, 0, 1, 1],
+                     [1, 0, 0, 1]]
+    check((r.warp_period, r.weft_period) == (4, 4),
+          "2/2 twill 8x8 has 4x4 repeat unit")
+    check(r.unit == expected_unit, "twill unit is the 4x4 tie-up pattern")
+    check(r.strict_2d_repeat is True, "twill is strict 2D repeat")
+
+
+def test_repeat_period_asymmetric_directions():
+    # 非对称单元 2 列 x 3 行，在 4 列 x 6 行上平铺：
+    # 专门防止把经/纬方向弄反——warp_period 必须整除列数(=2)，
+    # weft_period 必须整除行数(=3)。
+    unit = [[1, 0],
+            [0, 1],
+            [1, 1]]
+    matrix = [
+        [unit[h % 3][w % 2] for w in range(4)]
+        for h in range(6)
+    ]
+    r = repeat_period_of_matrix(matrix)
+    check(r.warp_period == 2 and r.weft_period == 3,
+          "warp period counts columns, weft period counts rows")
+    check(r.unit == unit, "unit is 3 rows x 2 cols")
+    check(r.strict_2d_repeat is True, "strict 2D repeat")
+
+
+def test_repeat_period_based_on_matrix_not_threading():
+    # 比较必须基于交织矩阵而非分别检查 threading/treadling：
+    # 穿综 [0,1,2,0,1,2] 看似周期 3，但三个综框的绑综列完全相同，
+    # 交织矩阵全为同一值，真实最小周期是 1x1。
+    threading = [0, 1, 2, 0, 1, 2]
+    tie_up = [[1, 1, 1]]
+    treadling = [0, 0]
+    r = analyze_repeat_period(threading, tie_up, treadling)
+    check((r.warp_period, r.weft_period) == (1, 1),
+          "identical tie-up columns collapse matrix warp period to 1")
+    check(r.unit == [[1]], "unit is 1x1")
+    check(r.strict_2d_repeat is True, "constant matrix is strict 2D repeat")
+
+    # 非退化版本：穿综/踏综序列周期均为 4，但综框 0/2、1/3 的绑综列分别
+    # 等价，交织矩阵的真实周期只有 2（矩阵周期只可能小于序列周期）。
+    threading2 = [0, 1, 2, 3, 0, 1, 2, 3]
+    tie_up2 = [[1, 0, 1, 0],
+               [0, 1, 0, 1]]
+    treadling2 = [0, 1, 0, 1, 0, 1, 0, 1]
+    r2 = analyze_repeat_period(threading2, tie_up2, treadling2)
+    check((r2.warp_period, r2.weft_period) == (2, 2),
+          "equivalent shafts/treadles shrink the matrix repeat below sequences")
+    check(r2.unit == [[1, 0], [0, 1]], "matrix unit 2x2, not the apparent 4x4")
+
+
+def test_repeat_period_cyclic_boundary():
+    # 循环纹样也要正确处理首尾边界：周期判定等价于跨末/首边界的循环比较。
+    # 序列 1 0 0 1 0 0 周期 3（平移 3 列后首行与自身跨边界相接一致）。
+    m = [[1, 0, 0, 1, 0, 0],
+         [0, 1, 1, 0, 1, 1]]
+    r = repeat_period_of_matrix(m)
+    check(r.warp_period == 3, f"cyclic-style boundary period 3, got {r.warp_period}")
+    check(r.weft_period == 2, "rows alternate with period 2")
+    check(r.unit == [[1, 0, 0], [0, 1, 1]], "unit across boundary")
+
+    # 仅首尾相接处不吻合时，即使整除尺寸的候选也不能算周期：
+    # 1 0 0 1 0 1 无周期 3（平移 3 后末位与首位冲突），只能取整幅 6。
+    m2 = [[1, 0, 0, 1, 0, 1]]
+    r2 = repeat_period_of_matrix(m2)
+    check(r2.warp_period == 6, "boundary mismatch rejects divisor candidate")
+    check(r2.weft_period == 1, "single row has weft period 1")
+    check(r2.strict_2d_repeat is False,
+          "one-direction-only repeat is not strict 2D")
+
+
+def test_repeat_period_full_size_fallback():
+    # 质数尺寸且无任何更小周期：两方向都返回完整尺寸，unit 即整幅矩阵
+    m = [[1, 0, 1],
+         [0, 1, 1],
+         [1, 1, 0]]
+    r = repeat_period_of_matrix(m)
+    check((r.warp_period, r.weft_period) == (3, 3),
+          "prime-sized non-repeating matrix falls back to full size")
+    check(r.unit == m, "unit is the full matrix")
+    check(r.strict_2d_repeat is False, "full size is not a strict 2D repeat")
+
+    # 单行矩阵：纬向必为 1（严格小于行数 1 不可能），非严格二维重复
+    r_one_row = repeat_period_of_matrix([[1, 0, 1, 0]])
+    check((r_one_row.warp_period, r_one_row.weft_period) == (2, 1),
+          "single row: warp period 2, weft period 1")
+    check(r_one_row.strict_2d_repeat is False,
+          "degenerate weft direction makes it non-strict")
+
+
+def test_repeat_period_only_one_direction():
+    # 仅列方向重复：每行各自水平周期 2，但三行互异（行数 3 为质数，
+    # 唯一真因数候选 1 不成立），故纬向取完整尺寸 3。
+    m = [[1, 0, 1, 0],
+         [0, 1, 0, 1],
+         [1, 1, 1, 1]]
+    r = repeat_period_of_matrix(m)
+    check((r.warp_period, r.weft_period) == (2, 3),
+          "repeats across columns but not rows")
+    check(r.unit == [[1, 0], [0, 1], [1, 1]], "unit spans all rows")
+    check(r.strict_2d_repeat is False, "not strict when rows never repeat")
+
+
+def test_repeat_period_divisors_only():
+    # 非整除尺寸的“视觉周期”不算合法周期：
+    # 1 0 1 0 1 在 5 列上像周期 2，但 2 不整除 5，无缝平铺做不到，取 5。
+    m = [[1, 0, 1, 0, 1]]
+    r = repeat_period_of_matrix(m)
+    check(r.warp_period == 5, "period must divide the dimension")
+    check(_divisors(12) == [1, 2, 3, 4, 6, 12], "divisors ascending")
+    check(_divisors(7) == [1, 7], "prime divisors")
+
+
 def test_validation():
     ok_cases = []
     # 维度不一致：绑综矩阵不是矩形
@@ -288,5 +436,13 @@ if __name__ == "__main__":
     test_repair_plans_two_flips_needed()
     test_repair_plans_state_dedup()
     test_repair_plans_limit_and_validation()
+    test_repeat_period_plain_weave()
+    test_repeat_period_twill()
+    test_repeat_period_asymmetric_directions()
+    test_repeat_period_based_on_matrix_not_threading()
+    test_repeat_period_cyclic_boundary()
+    test_repeat_period_full_size_fallback()
+    test_repeat_period_only_one_direction()
+    test_repeat_period_divisors_only()
     test_validation()
     print("all tests passed")
